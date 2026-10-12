@@ -1,0 +1,229 @@
+import argparse
+import csv
+import json
+import random
+from pathlib import Path
+
+
+def generate_task_graph(graph_id, num_tasks, rng):
+    """Generate one synthetic DAG with latency-focused task-flow structure."""
+    big_count = max(6, int(0.12 * num_tasks))
+    small_count = num_tasks - big_count
+
+    tasks = []
+    edges = []
+
+    # Create layered DAG structure with few large tasks and many small tasks.
+    total_layers = max(5, min(8, num_tasks // 12))
+    layers = [[] for _ in range(total_layers)]
+
+    # Place large tasks across the graph to create computational hotspots.
+    for i in range(big_count):
+        layer = rng.randint(0, total_layers - 1)
+        layers[layer].append(f"T{i}")
+
+    # Fill remaining tasks with small tasks.
+    task_counter = big_count
+    for layer_idx in range(total_layers):
+        while len(layers[layer_idx]) < max(6, (layer_idx + 1) * 2):
+            if task_counter >= num_tasks:
+                break
+            layers[layer_idx].append(f"T{task_counter}")
+            task_counter += 1
+
+    # If some slots remain, distribute small tasks across layers.
+    while task_counter < num_tasks:
+        layer_idx = rng.randint(0, total_layers - 1)
+        layers[layer_idx].append(f"T{task_counter}")
+        task_counter += 1
+
+    # Add task metadata.
+    for layer_idx, layer_tasks in enumerate(layers):
+        for task_idx, task_name in enumerate(layer_tasks):
+            if task_name.startswith("T") and int(task_name[1:]) < big_count:
+                task_type = "large"
+                compute_edge = rng.randint(180, 520)
+                compute_fog = rng.randint(110, 360)
+                compute_cloud = rng.randint(70, 220)
+                memory_mb = rng.randint(500, 1200)
+                preferred_resource = rng.choice(["fog", "cloud"])
+                deadline_ms = rng.randint(300, 900)
+            else:
+                task_type = "small"
+                compute_edge = rng.randint(18, 90)
+                compute_fog = rng.randint(10, 55)
+                compute_cloud = rng.randint(6, 35)
+                memory_mb = rng.randint(80, 420)
+                preferred_resource = rng.choice(["edge", "fog"])
+                deadline_ms = rng.randint(120, 450)
+
+            tasks.append({
+                "graph_id": graph_id,
+                "task_id": task_name,
+                "task_type": task_type,
+                "layer": layer_idx,
+                "compute_cost_edge": compute_edge,
+                "compute_cost_fog": compute_fog,
+                "compute_cost_cloud": compute_cloud,
+                "memory_mb": memory_mb,
+                "preferred_resource": preferred_resource,
+                "deadline_ms": deadline_ms,
+            })
+
+    # Build communication edges. Each task connects to tasks in the next layer with a probability.
+    for layer_idx in range(total_layers - 1):
+        current_layer = layers[layer_idx]
+        next_layer = layers[layer_idx + 1]
+        for src in current_layer:
+            target_candidates = next_layer[:]
+            if not target_candidates:
+                continue
+            if rng.random() < 0.5:
+                dst = rng.choice(target_candidates)
+                communication = rng.randint(15, 120)
+                bandwidth = rng.randint(80, 240)
+                edges.append({
+                    "graph_id": graph_id,
+                    "src_task_id": src,
+                    "dst_task_id": dst,
+                    "communication_cost": communication,
+                    "bandwidth_mb_per_s": bandwidth,
+                })
+
+    # Guarantee DAG connectivity by linking a few tasks to the next layer whenever possible.
+    for layer_idx in range(total_layers - 1):
+        if not layers[layer_idx] or not layers[layer_idx + 1]:
+            continue
+        for src in layers[layer_idx][: min(2, len(layers[layer_idx]))]:
+            dst = layers[layer_idx + 1][0]
+            if not any(e["src_task_id"] == src and e["dst_task_id"] == dst for e in edges):
+                edges.append({
+                    "graph_id": graph_id,
+                    "src_task_id": src,
+                    "dst_task_id": dst,
+                    "communication_cost": rng.randint(20, 100),
+                    "bandwidth_mb_per_s": rng.randint(60, 200),
+                })
+
+    return tasks, edges
+
+
+def write_csv(path, fieldnames, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def generate_resources(output_path, rng):
+    resources = [
+        {
+            "resource_id": "edge_1",
+            "resource_type": "edge",
+            "location": "edge_zone_1",
+            "capacity_mips": 1200,
+            "latency_ms": 18,
+            "energy_per_second": 0.08,
+        },
+        {
+            "resource_id": "edge_2",
+            "resource_type": "edge",
+            "location": "edge_zone_2",
+            "capacity_mips": 1400,
+            "latency_ms": 22,
+            "energy_per_second": 0.09,
+        },
+        {
+            "resource_id": "fog_1",
+            "resource_type": "fog",
+            "location": "fog_zone_1",
+            "capacity_mips": 3000,
+            "latency_ms": 36,
+            "energy_per_second": 0.13,
+        },
+        {
+            "resource_id": "fog_2",
+            "resource_type": "fog",
+            "location": "fog_zone_2",
+            "capacity_mips": 3600,
+            "latency_ms": 42,
+            "energy_per_second": 0.15,
+        },
+        {
+            "resource_id": "cloud_1",
+            "resource_type": "cloud",
+            "location": "cloud_region_1",
+            "capacity_mips": 8000,
+            "latency_ms": 95,
+            "energy_per_second": 0.22,
+        },
+    ]
+
+    write_csv(
+        output_path,
+        ["resource_id", "resource_type", "location", "capacity_mips", "latency_ms", "energy_per_second"],
+        resources,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate synthetic task-flow DAGs for fog-edge-cloud latency optimization")
+    parser.add_argument("--num-tasks", type=int, default=100, help="Number of tasks per graph")
+    parser.add_argument("--num-graphs", type=int, default=5, help="Number of synthetic DAGs to generate")
+    parser.add_argument("--output-dir", type=str, default="data/generated", help="Directory for generated CSV outputs")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic generation")
+    args = parser.parse_args()
+
+    rng = random.Random(args.seed)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    all_tasks = []
+    all_edges = []
+
+    for graph_id in range(1, args.num_graphs + 1):
+        tasks, edges = generate_task_graph(graph_id, args.num_tasks, rng)
+        all_tasks.extend(tasks)
+        all_edges.extend(edges)
+
+    write_csv(
+        output_dir / "tasks.csv",
+        [
+            "graph_id",
+            "task_id",
+            "task_type",
+            "layer",
+            "compute_cost_edge",
+            "compute_cost_fog",
+            "compute_cost_cloud",
+            "memory_mb",
+            "preferred_resource",
+            "deadline_ms",
+        ],
+        all_tasks,
+    )
+
+    write_csv(
+        output_dir / "edges.csv",
+        ["graph_id", "src_task_id", "dst_task_id", "communication_cost", "bandwidth_mb_per_s"],
+        all_edges,
+    )
+
+    generate_resources(output_dir / "resources.csv", rng)
+
+    metadata = {
+        "description": "Synthetic task-flow graphs for latency-sensitive fog-edge-cloud scheduling",
+        "num_graphs": args.num_graphs,
+        "tasks_per_graph": args.num_tasks,
+        "task_mix": {"large": "few", "small": "many"},
+        "resource_types": ["edge", "fog", "cloud"],
+        "generated_by": "scripts/generate_dataset.py",
+    }
+
+    (output_dir / "dataset_metadata.json").write_text(json.dumps(metadata, indent=2))
+    print(f"Generated {args.num_graphs} DAGs with {args.num_tasks} tasks each in {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
